@@ -4,8 +4,8 @@ import { map, pipe, zipWith } from "ramda";
 import { makeEmptySExp, makeSymbolSExp, SExpValue, makeCompoundSExp, valueToString } from '../imp/L3-value'
 import { first, second, rest, allT, isEmpty } from "../shared/list";
 import { isArray, isString, isNumericString, isIdentifier } from "../shared/type-predicates";
-import { Result, makeOk, makeFailure, bind, mapResult, mapv } from "../shared/result";
-import { parse as p, isSexpString, isToken } from "../shared/parser";
+import {Result, makeOk, makeFailure, bind, mapResult, mapv, safe2} from "../shared/result";
+import { parse as p, isSexpString, isToken, isCompoundSexp } from "../shared/parser";
 import { Sexp, Token } from "s-expression";
 
 /*
@@ -47,8 +47,8 @@ import { Sexp, Token } from "s-expression";
 
 export type Exp = DefineExp | CExp;
 export type AtomicExp = NumExp | BoolExp | StrExp | PrimOp | VarRef;
-export type CompoundExp = AppExp | IfExp | ProcExp | LetExp | LitExp;
-export type CExp =  AtomicExp | CompoundExp;
+export type CompoundExp = AppExp | IfExp | CondExp | ProcExp | LetExp | LitExp;
+export type CExp =  AtomicExp | CompoundExp | CondClause;
 
 export type Program = {tag: "Program"; exps: Exp[]; }
 export type DefineExp = {tag: "DefineExp"; var: VarDecl; val: CExp; }
@@ -61,6 +61,8 @@ export type VarDecl = {tag: "VarDecl"; var: string; }
 export type AppExp = {tag: "AppExp"; rator: CExp; rands: CExp[]; }
 // L2
 export type IfExp = {tag: "IfExp"; test: CExp; then: CExp; alt: CExp; }
+export type CondClause = { tag: "CondClause", test: CExp, then: CExp[]; }
+export type CondExp = { tag: "CondExp", condclauses: CondClause[]; }
 export type ProcExp = {tag: "ProcExp"; args: VarDecl[], body: CExp[]; }
 export type Binding = {tag: "Binding"; var: VarDecl; val: CExp; }
 export type LetExp = {tag: "LetExp"; bindings: Binding[]; body: CExp[]; }
@@ -82,6 +84,10 @@ export const makeAppExp = (rator: CExp, rands: CExp[]): AppExp =>
 // L2
 export const makeIfExp = (test: CExp, then: CExp, alt: CExp): IfExp =>
     ({tag: "IfExp", test: test, then: then, alt: alt});
+export const makeCondClause = (test: CExp, then: CExp[]) : CondClause =>
+    ({ tag: "CondClause", test: test, then: then });
+export const makeCondExp = (condclauses: CondClause[]) : CondExp =>
+    ({ tag: "CondExp", condclauses: condclauses });
 export const makeProcExp = (args: VarDecl[], body: CExp[]): ProcExp =>
     ({tag: "ProcExp", args: args, body: body});
 export const makeBinding = (v: string, val: CExp): Binding =>
@@ -105,6 +111,8 @@ export const isVarDecl = (x: any): x is VarDecl => x.tag === "VarDecl";
 export const isAppExp = (x: any): x is AppExp => x.tag === "AppExp";
 // L2
 export const isIfExp = (x: any): x is IfExp => x.tag === "IfExp";
+export const isCondClause = (x:any): x is CondClause => x.tag === "CondClause";
+export const isCondExp = (x:any): x is CondExp => x.tag === "CondExp";
 export const isProcExp = (x: any): x is ProcExp => x.tag === "ProcExp";
 export const isBinding = (x: any): x is Binding => x.tag === "Binding";
 export const isLetExp = (x: any): x is LetExp => x.tag === "LetExp";
@@ -117,7 +125,7 @@ export const isAtomicExp = (x: any): x is AtomicExp =>
     isNumExp(x) || isBoolExp(x) || isStrExp(x) ||
     isPrimOp(x) || isVarRef(x);
 export const isCompoundExp = (x: any): x is CompoundExp =>
-    isAppExp(x) || isIfExp(x) || isProcExp(x) || isLitExp(x) || isLetExp(x);
+    isAppExp(x) || isIfExp(x) || isCondExp(x) || isProcExp(x) || isLitExp(x) || isLetExp(x);
 export const isCExp = (x: any): x is CExp =>
     isAtomicExp(x) || isCompoundExp(x);
 
@@ -158,6 +166,7 @@ export const parseL31CompoundCExp = (op: Sexp, params: Sexp[]): Result<CExp> =>
 export const parseL31SpecialForm = (op: Sexp, params: Sexp[]): Result<CExp> =>
     isEmpty(params) ? makeFailure("Empty args for special form") :
     op === "if" ? parseIfExp(params) :
+        op === "cond" ? parseCondExp(params) :
     op === "lambda" ? parseProcExp(first(params), rest(params)) :
     op === "let" ? parseLetExp(first(params), rest(params)) :
     op === "quote" ? parseLitExp(first(params)) :
@@ -201,7 +210,7 @@ const isPrimitiveOp = (x: string): boolean =>
      "number?", "boolean?", "symbol?", "string?"].includes(x);
 
 const isSpecialForm = (x: string): boolean =>
-    ["if", "lambda", "let", "quote"].includes(x);
+    ["if", "lambda", "let", "quote", "cond"].includes(x);
 
 const parseAppExp = (op: Sexp, params: Sexp[]): Result<AppExp> =>
     bind(parseL31CExp(op), (rator: CExp) => 
@@ -212,6 +221,25 @@ const parseIfExp = (params: Sexp[]): Result<IfExp> =>
     params.length !== 3 ? makeFailure(`Expression not of the form (if <cexp> <cexp> <cexp>): ${JSON.stringify(params, null, 2)}`) :
     mapv(mapResult(parseL31CExp, params), (cexps: CExp[]) => 
         makeIfExp(cexps[0], cexps[1], cexps[2]));
+
+// CondExp -> (cond (<CExp> <CExp>+)+)
+export const parseCondExp = (params: Sexp[]): Result<CondExp> => {
+    if (!allT(isCompoundSexp, params)) {
+        return makeFailure("Invalid cond clauses");
+    }
+    else if (!params.some((x)=> x.some((y)=>y==="else"))){
+        return makeFailure("No else in cond");
+    }
+    else if(first(params).some((x)=>x==="else")){
+        return makeFailure("Missing case");
+    }
+    else {
+        const clausesResult = mapResult((clause: Sexp[]) =>
+            safe2((test: CExp, then: CExp[]) => makeOk(makeCondClause(test, then)))
+            (parseL31CExp(first(clause)), mapResult(parseL31CExp, rest(clause))), params);
+        return bind(clausesResult, (clauses: CondClause[]) => makeOk(makeCondExp(clauses)));
+    }
+}
 
 const parseProcExp = (vars: Sexp, body: Sexp[]): Result<ProcExp> =>
     isArray(vars) && allT(isString, vars) ? mapv(mapResult(parseL31CExp, body), (cexps: CExp[]) => 
@@ -287,6 +315,9 @@ const unparseLitExp = (le: LitExp): string =>
 const unparseLExps = (les: Exp[]): string =>
     map(unparseL31, les).join(" ");
 
+const unparseCondClause = (les: CondClause[]): string =>
+    map(unparseL31, les).join(" ");
+
 const unparseProcExp = (pe: ProcExp): string => 
     `(lambda (${map((p: VarDecl) => p.var, pe.args).join(" ")}) ${unparseLExps(pe.body)})`
 
@@ -301,6 +332,8 @@ export const unparseL31 = (exp: Program | Exp): string =>
     isVarRef(exp) ? exp.var :
     isProcExp(exp) ? unparseProcExp(exp) :
     isIfExp(exp) ? `(if ${unparseL31(exp.test)} ${unparseL31(exp.then)} ${unparseL31(exp.alt)})` :
+        isCondExp(exp) ? `(cond ${unparseCondClause(exp.condclauses)})`:
+            isCondClause(exp) ? `(${unparseL31(exp.test)} ${unparseLExps(exp.then)})`:
     isAppExp(exp) ? `(${unparseL31(exp.rator)} ${unparseLExps(exp.rands)})` :
     isPrimOp(exp) ? exp.op :
     isLetExp(exp) ? unparseLetExp(exp) :

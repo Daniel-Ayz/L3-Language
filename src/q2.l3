@@ -55,6 +55,15 @@
   )
  )
 
+(define nth
+  (lambda (lst n)
+    (if (eq? lst '())
+        '()
+        (if (= n 0)
+            (car lst)
+            (nth (cdr lst) (- n 1))))))
+
+
 (define root
   (lambda (tree)
     (car tree)
@@ -63,18 +72,18 @@
 
 (define left
   (lambda (tree)
-    (if (empty? (cdr tree))
+    (if (eq? tree '())
         '()
-        (car (cdr tree))
+        (nth tree 1)
      )
   )
  )
 
 (define right
   (lambda (tree)
-    (if (empty? (cdr tree))
+    (if (eq? tree '())
         '()
-        (cdr (cdr tree))
+        (nth tree 2)
      )
   )
  )
@@ -103,66 +112,72 @@
     (if (empty? tree)
         '()
         (if (pair? tree)
-            (if (empty? (right tree))
-                (if (empty? (left tree))
-                    (root tree)
-                    (cons (root tree) (mirror-tree (left tree)))
-                 )
-                (if (empty? (left tree))
-                    (cons (root tree) (mirror-tree (right tree)))
-                    (cons (root tree) (cons (mirror-tree (right tree)) (mirror-tree (left tree))))
-                 )
-             )
-            (cons tree '())
+             (list (root tree) (mirror-tree(right tree)) (mirror-tree(left tree)))
+             tree
          )
      )
   )
  )
 
+
+
 (define make-ok
   (lambda (val)
-    (cons #t val)
+    (cons 'ok val)
   )
  )
  
 (define make-error
   (lambda (msg)
-    (cons #f msg)
+    (cons 'error msg)
   )
  )
 
 (define ok?
   (lambda (res)
-    (eq? (car res) #t)
+    (if (pair? res)
+            (eq? (car res) 'ok)
+            #f
+        )
   )
  )
 
 (define error?
   (lambda (res)
-    (eq? (car res) #f)
+    (if (pair? res)
+        (eq? (car res) 'error)
+        #f
+    )
+
   )
  )
 
 (define result?
   (lambda (res)
-    (pair? res)
+    (or (error? res) (ok? res))
   )
  )
 
 (define result->val
   (lambda (res)
-    (cdr res)
+    (if (result? res)
+        (cdr res)
+        (make-error "Error: not a result")
+     )
+
   )
 )
 
 (define bind 
   (lambda (f)
-    (lambda (res) (
-                    (if (ok? res)
-                        (f (result->val res))
-                        (res)
-                    )
-                  )
+    (lambda (res)
+            (if (result? res)
+                (if (ok? res)
+                    (f (result->val res))
+                    res
+                )
+                (make-error "Error: not a result")
+            )
     )
   )
 )
